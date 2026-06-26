@@ -1,5 +1,6 @@
 """Tests for the CLI helpers: config merge, compute-flow, data_fn, package import."""
 
+import pytest
 import torch
 
 from fav import config as C
@@ -24,6 +25,7 @@ def test_coerce_types():
 
 
 def test_config_yaml_merge(tmp_path):
+    pytest.importorskip("yaml")
     p = tmp_path / "c.yaml"
     p.write_text("num_iterations: 7\nloss:\n  pixel_loss_weight: 99\n")
     cfg = C.merge_overrides(C.TrainConfig(), C.load_yaml(p))
@@ -31,6 +33,7 @@ def test_config_yaml_merge(tmp_path):
 
 
 def _write_frames(d, n, size=32):
+    pytest.importorskip("PIL")
     from PIL import Image
     import numpy as np
 

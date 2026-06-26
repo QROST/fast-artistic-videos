@@ -1,8 +1,10 @@
 name: fav CI
 
 on:
+  # Run on pushes to the default branch and on every PR. PR branches are covered
+  # by pull_request, so push is scoped to master to avoid duplicate runs.
   push:
-    branches: ["**"]
+    branches: ["master"]
     paths: ["fav/**", "tests/**", "pyproject.toml", "conftest.py", ".github/workflows/fav-ci.yml"]
   pull_request:
     paths: ["fav/**", "tests/**", "pyproject.toml", "conftest.py", ".github/workflows/fav-ci.yml"]
@@ -19,6 +21,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install numpy pytest
+          pip install numpy pytest pillow pyyaml
       - name: Run tests
         run: pytest -q
