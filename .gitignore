@@ -39,3 +39,12 @@ luac.out
 *.x86_64
 *.hex
 
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+debug/

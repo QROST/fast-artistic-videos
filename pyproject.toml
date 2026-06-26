@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fav"
+version = "0.1.0"
+description = "Fast Artistic Videos — faithful PyTorch/MPS port (Phase 1)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Free for personal or research use; see README" }
+dependencies = [
+    "torch>=2.2",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+# Optical-flow estimators (RAFT ships with torchvision; ptlflow is optional).
+flow = ["torchvision>=0.17"]
+ptlflow = ["ptlflow>=0.3"]
+# Spherical/360 cube<->equirect without the legacy Transform360 ffmpeg filter.
+vr = ["py360convert>=1.0"]
+# Image/video I/O helpers and config files.
+io = ["pillow>=9.0", "pyyaml>=6.0", "imageio>=2.30", "imageio-ffmpeg>=0.4"]
+# Converting the legacy nn.Sequential VGG-16 .t7 loss network.
+convert = ["torchfile>=0.1.0"]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+fav = "fav.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["fav*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
