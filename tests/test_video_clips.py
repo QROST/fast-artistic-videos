@@ -47,6 +47,34 @@ def test_video_clips_source_short_clip(tmp_path):
     src = VideoClipsSource(vdir, DummyFlowEstimator(), crop=24)
     imgs, flows, certs = src.sample(num=3, batch=1)
     assert len(imgs) == 4 and len(flows) == 3  # last frame repeated to fill
+    # Padded transitions (frames 2 and 3 are repeats of frame 1) are fully occluded.
+    assert certs[0].sum() > 0          # real transition 0->1
+    assert certs[1].sum() == 0         # padded
+    assert certs[2].sum() == 0         # padded
+
+
+def test_build_video_tuple_output_on_frames_device():
+    # Contract: output tensors live on the frames' device regardless of estimator.
+    frames = [torch.rand(1, 3, 24, 24) for _ in range(2)]
+    imgs, flows, certs = build_video_tuple_batched(frames, DummyFlowEstimator(), use_structure=False)
+    assert flows[0].device == frames[0].device
+    assert certs[0].device == frames[0].device
+
+
+def test_build_data_fn_video_fallback_label(tmp_path):
+    # With no video_dir, a 'video' draw must report the actual data it produced.
+    from fav import config as C
+    from fav.cli import build_data_fn
+
+    imgs_dir = tmp_path / "imgs"
+    _write_clip(imgs_dir, 3, size=300)
+    cfg = C.TrainConfig()
+    cfg.data.image_dir = str(imgs_dir)
+    cfg.data.data_mix = "video:1"  # only video, but no video_dir -> shift fallback
+    cfg.batch_size = 1
+    data_fn = build_data_fn(cfg, device="cpu")
+    source, imgs, flows, certs = data_fn(1)
+    assert source == "shift"  # not "video"
 
 
 def test_build_dataset_writes_per_clip_assets(tmp_path):

@@ -34,8 +34,11 @@ def build_video_tuple_batched(frames, estimator: FlowEstimator, use_structure: b
     flow_list, cert_list = [], []
     for i in range(num):
         prev, cur = frames[i], frames[i + 1]
-        backward = estimate_at_friendly_size(estimator, cur, prev)  # (b,2,H,W) cur->prev
-        forward = estimate_at_friendly_size(estimator, prev, cur)   # (b,2,H,W) prev->cur
+        # The estimator may run on a different device (e.g. RAFT on MPS); bring the
+        # flow back to the frames' device so the downstream occlusion math (which
+        # mixes flow with the content image) stays on a single device.
+        backward = estimate_at_friendly_size(estimator, cur, prev).to(prev.device)  # cur->prev
+        forward = estimate_at_friendly_size(estimator, prev, cur).to(prev.device)   # prev->cur
         certs = []
         for e in range(cur.shape[0]):
             content = cur[e] if use_structure else None
@@ -72,15 +75,21 @@ class VideoClipsSource:
     def _rand(self, high: int) -> int:
         return int(torch.randint(0, high, (1,), generator=self.generator).item())
 
-    def _load_window(self, num: int) -> list[torch.Tensor]:
-        """Load ``num+1`` consecutive frames (each (3,H,W)) from a random clip+crop."""
-        # Pick a clip long enough; clamp num down if no clip is long enough.
+    def _load_window(self, num: int):
+        """Load ``num+1`` consecutive frames (each (3,H,W)) from a random clip+crop.
+
+        Returns ``(frames, real_len)`` where ``real_len`` is the number of genuine
+        consecutive frames (``< num+1`` only when no clip is long enough); the
+        caller marks transitions past ``real_len`` as occluded so the repeated-frame
+        padding never trains spurious zero-motion / perfect-consistency samples.
+        """
         candidates = [c for c in self.clips if len(c) >= num + 1]
         clip = candidates[self._rand(len(candidates))] if candidates else max(self.clips, key=len)
         eff = min(num + 1, len(clip))
         start = self._rand(len(clip) - eff + 1)
         frames = [load_rgb(clip[start + k], batched=False) for k in range(eff)]
-        # Repeat the last frame if the clip was shorter than requested.
+        real_len = len(frames)
+        # Repeat the last frame if the clip was shorter than requested (rare).
         while len(frames) < num + 1:
             frames.append(frames[-1].clone())
         # Common random crop across the window so motion is coherent.
@@ -96,11 +105,20 @@ class VideoClipsSource:
             _, h, w = frames[0].shape
         top = self._rand(h - size + 1)
         left = self._rand(w - size + 1)
-        return [f[:, top:top + size, left:left + size].contiguous() for f in frames]
+        cropped = [f[:, top:top + size, left:left + size].contiguous() for f in frames]
+        return cropped, real_len
 
     def sample(self, num: int, batch: int):
         """Return a batched ``(imgsList, flowList, certList)`` tuple."""
         windows = [self._load_window(num) for _ in range(batch)]
+        win_frames = [w[0] for w in windows]
+        real_lens = [w[1] for w in windows]
         # Stack across batch: frames[i] = (b,3,H,W).
-        frames = [torch.stack([windows[e][i] for e in range(batch)]) for i in range(num + 1)]
-        return build_video_tuple_batched(frames, self.estimator, self.use_structure)
+        frames = [torch.stack([win_frames[e][i] for e in range(batch)]) for i in range(num + 1)]
+        imgs, flows, certs = build_video_tuple_batched(frames, self.estimator, self.use_structure)
+        # Mark padded (repeated-frame) transitions as fully occluded.
+        for i in range(num):
+            for e in range(batch):
+                if i + 1 >= real_lens[e]:
+                    certs[i][e].zero_()
+        return imgs, flows, certs

@@ -67,8 +67,10 @@ def build_data_fn(cfg, device="cpu"):
             cfg.data.video_dir, build_estimator(cfg.data.flow_backend), crop=crop
         )
 
+    gen = torch.Generator().manual_seed(cfg.seed) if cfg.seed else None
+
     def sample_images(batch):
-        idxs = torch.randint(0, len(img_source), (batch,))
+        idxs = torch.randint(0, len(img_source), (batch,), generator=gen)
         return torch.stack([img_source[int(i)] for i in idxs]).to(device)
 
     def data_fn(it):
@@ -91,7 +93,9 @@ def build_data_fn(cfg, device="cpu"):
             mode = "shift"
         imgs_raw = sample_images(cfg.batch_size)
         imgs, flows, certs = synth.sample(mode, imgs_raw, num)
-        return source, imgs, flows, certs
+        # Return the actual mode so the logged/bucketed source label matches the
+        # data produced (a 'video' fallback yields 'shift' data, not 'video').
+        return mode, imgs, flows, certs
 
     return data_fn
 
