@@ -57,8 +57,20 @@ def build_data_fn(cfg, device="cpu"):
     frame_steps = parse_step_schedule(cfg.data.num_frame_steps)
     warned = {"video": False}
 
+    # Real-video source, if a clip directory is configured and the mix uses it.
+    video_source = None
+    if mix.needs_real_video and cfg.data.video_dir:
+        from fav.data.video_clips import VideoClipsSource
+        from fav.flow import build_estimator
+
+        video_source = VideoClipsSource(
+            cfg.data.video_dir, build_estimator(cfg.data.flow_backend), crop=crop
+        )
+
+    gen = torch.Generator().manual_seed(cfg.seed) if cfg.seed else None
+
     def sample_images(batch):
-        idxs = torch.randint(0, len(img_source), (batch,))
+        idxs = torch.randint(0, len(img_source), (batch,), generator=gen)
         return torch.stack([img_source[int(i)] for i in idxs]).to(device)
 
     def data_fn(it):
@@ -66,15 +78,24 @@ def build_data_fn(cfg, device="cpu"):
         num = value_at(frame_steps, it)
         if source == "single_image":
             num = 1
-        imgs_raw = sample_images(cfg.batch_size)
+        if source == "video" and video_source is not None:
+            imgs, flows, certs = video_source.sample(num, cfg.batch_size)
+            imgs = [x.to(device) for x in imgs]
+            flows = [f.to(device) for f in flows]
+            certs = [c.to(device) for c in certs]
+            return source, imgs, flows, certs
         mode = source
         if source == "video":
             if not warned["video"]:
-                print("NOTE: no real-video source configured; 'video' falls back to 'shift'.")
+                print("NOTE: no real-video source configured (data.video_dir empty); "
+                      "'video' falls back to 'shift'.")
                 warned["video"] = True
             mode = "shift"
+        imgs_raw = sample_images(cfg.batch_size)
         imgs, flows, certs = synth.sample(mode, imgs_raw, num)
-        return source, imgs, flows, certs
+        # Return the actual mode so the logged/bucketed source label matches the
+        # data produced (a 'video' fallback yields 'shift' data, not 'video').
+        return mode, imgs, flows, certs
 
     return data_fn
 
@@ -111,25 +132,21 @@ def run_train(cfg, device=None, max_iters=None):
     return history
 
 
-def run_compute_flow(frames_dir, out_dir, backend="raft", pattern="frame_%05d.png", start=1):
+def run_compute_flow(frames_dir, out_dir, backend="raft", pattern="frame_%05d.png", start=1,
+                     estimator=None):
     from fav.flow import build_estimator, compute_pair, write_pair
-    from PIL import Image
-    import numpy as np
+    from fav.data.io_utils import load_rgb
 
-    est = build_estimator(backend)
+    est = estimator if estimator is not None else build_estimator(backend)
 
     def load(i):
         p = Path(frames_dir) / (pattern % i)
-        if not p.exists():
-            return None
-        with Image.open(p) as im:
-            arr = np.asarray(im.convert("RGB"), dtype="float32") / 255.0
-        return torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0)
+        return load_rgb(p) if p.exists() else None
 
     i = start
     prev = load(i)
     written = 0
-    while True:
+    while prev is not None:
         cur = load(i + 1)
         if cur is None:
             break
@@ -139,6 +156,85 @@ def run_compute_flow(frames_dir, out_dir, backend="raft", pattern="frame_%05d.pn
         i += 1
         written += 1
     return written
+
+
+def run_build_dataset(video_dir, out_dir, backend="raft", pattern="frame_%05d.png", start=1):
+    """Precompute flow + occlusion assets for every clip subdir under video_dir.
+
+    Mirrors video_dataset/make_*: each clip's assets are written under
+    out_dir/<clip_name>/ with the legacy filenames, ready for the stylize
+    pipeline or asset-based training.
+    """
+    from fav.flow import build_estimator
+
+    root = Path(video_dir)
+    clips = [p for p in sorted(root.iterdir()) if p.is_dir()] or [root]
+    est = build_estimator(backend)  # reuse one estimator across clips
+    total = 0
+    for clip in clips:
+        sub_out = Path(out_dir) / clip.name if clip is not root else Path(out_dir)
+        total += run_compute_flow(str(clip), str(sub_out), backend, pattern, start, estimator=est)
+    return total
+
+
+def run_stylize_vr(cfg, device=None):
+    from fav.train.checkpoint import load_checkpoint
+    from fav.models.generator import Generator
+    from fav.vr.stylize_vr import stylize_faces_over_time, faces_to_equirect
+    from fav.vr.cubemap import PROC_ORDER
+    from fav.infer.stylize_planar import resolve_pattern
+    from fav.warp.flow_io import read_flo, read_pgm, uv_to_dydx
+    from fav.data.io_utils import load_rgb, save_rgb
+
+    device = select_device(device or cfg.device)
+    ckpt = load_checkpoint(cfg.model_vid, map_location=str(device))
+    model = Generator(ckpt["config"]["model"]["arch"]).to(device)
+    model.load_state_dict(ckpt["state_dict"])
+    model.eval()
+
+    faces = sorted(PROC_ORDER)
+    start = cfg.continue_with
+
+    def frame_path(idx, face):
+        return cfg.input_pattern % (idx, face)
+
+    n = 0
+    while n < cfg.num_frames and Path(frame_path(start + n, faces[0])).exists():
+        n += 1
+    if n == 0:
+        raise FileNotFoundError(f"no VR frames match {cfg.input_pattern} from {start}")
+
+    faces_seq, flows_seq, certs_seq = [], [], []
+    for t in range(n):
+        idx = start + t
+        faces_seq.append({f: load_rgb(frame_path(idx, f)).to(device) for f in faces})
+        if t > 0:
+            fl, ce = {}, {}
+            for f in faces:
+                flo = read_flo(resolve_pattern(cfg.flow_pattern, idx, idx - 1) % f).to(device)
+                fl[f] = uv_to_dydx(flo).unsqueeze(0)
+                cert_px = read_pgm(resolve_pattern(cfg.occlusions_pattern, idx, idx - 1) % f).float()
+                ce[f] = (cert_px / 255.0).view(1, 1, *cert_px.shape).to(device)
+            flows_seq.append(fl)
+            certs_seq.append(ce)
+
+    out_seq = stylize_faces_over_time(
+        model, faces_seq, flows_seq, certs_seq, model_img=cfg.model_img,
+        occlusions_min_filter=cfg.occlusions_min_filter,
+        median_filter_size=cfg.median_filter, fill_occlusions=cfg.fill_occlusions,
+    )
+
+    paths = []
+    for t in range(n):
+        idx = start + t
+        for f in faces:
+            p = Path(f"{cfg.output_prefix}-{idx:05d}-{f}.png")
+            save_rgb(p, out_seq[t][f])
+            paths.append(p)
+        if cfg.out_equi:
+            equi = faces_to_equirect(out_seq[t], cfg.out_equi_h, cfg.out_equi_w)
+            save_rgb(f"{cfg.output_prefix}-{idx:05d}-equi.png", equi)
+    return paths
 
 
 def run_stylize(cfg, device=None):
@@ -191,6 +287,13 @@ def main(argv=None):
     p_flow.add_argument("--pattern", default="frame_%05d.png")
     p_flow.add_argument("--start", type=int, default=1)
 
+    p_ds = sub.add_parser("build-dataset", help="precompute flow+occlusion assets for clip subdirs")
+    p_ds.add_argument("--video", required=True, help="dir of clip subdirectories")
+    p_ds.add_argument("--out", required=True)
+    p_ds.add_argument("--backend", default="raft")
+    p_ds.add_argument("--pattern", default="frame_%05d.png")
+    p_ds.add_argument("--start", type=int, default=1)
+
     p_conv = sub.add_parser("convert-vgg", help="convert vgg16.t7 -> .pt loss net")
     p_conv.add_argument("t7")
     p_conv.add_argument("out")
@@ -207,6 +310,10 @@ def main(argv=None):
     if args.cmd == "compute-flow":
         n = run_compute_flow(args.frames, args.out, args.backend, args.pattern, args.start)
         print(f"wrote flow/occlusion for {n} frame pairs")
+        return
+    if args.cmd == "build-dataset":
+        n = run_build_dataset(args.video, args.out, args.backend, args.pattern, args.start)
+        print(f"wrote flow/occlusion assets for {n} frame pairs across clips")
         return
     if args.cmd == "convert-vgg":
         from fav.conversion import convert_vgg16_t7
@@ -230,7 +337,8 @@ def main(argv=None):
         paths = run_stylize(cfg)
         print(f"wrote {len(paths)} stylized frames")
     elif args.cmd == "stylize-vr":
-        raise SystemExit("stylize-vr CLI wiring pending; use fav.vr.stylize_vr API for now")
+        paths = run_stylize_vr(cfg)
+        print(f"wrote {len(paths)} stylized cube-face frames")
 
 
 if __name__ == "__main__":

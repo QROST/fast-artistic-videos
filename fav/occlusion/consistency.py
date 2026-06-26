@@ -203,5 +203,7 @@ def compute_reliability(
     """
     structure = None
     if content_image is not None:
-        structure = compute_corners(content_image, rho=rho)
+        # Keep the structure map on the flow's device (the content image may be
+        # loaded on a different device than the estimator's flow output).
+        structure = compute_corners(content_image.to(flow1.device), rho=rho)
     return check_consistency(flow1, flow2, structure=structure)
