@@ -51,12 +51,51 @@ def _central_diff(x: torch.Tensor, axis: str) -> torch.Tensor:
         return F.conv2d(xp, kernel, groups=c)
 
 
-def compute_corners(image: torch.Tensor, rho: float = 3.0) -> torch.Tensor:
+def _recursive_smooth_x(m: torch.Tensor, sigma: float) -> torch.Tensor:
+    """Deriche recursive Gaussian along the last axis (port of recursiveSmoothX).
+
+    ``m`` is ``(H, W)``; the recurrence runs along ``W`` independently per row, so
+    it is vectorized across rows. Both the causal and anti-causal passes read the
+    original input (matching the C++, which writes the result only at the end).
+    """
+    h, w = m.shape
+    alpha = 2.5 / (math.sqrt(math.pi) * sigma)
+    e = math.exp(-alpha)
+    e2 = e * e
+    a2e = 2.0 * e
+    k = (1.0 - e) * (1.0 - e) / (1.0 + 2.0 * alpha * e - e2)
+    pm = e * (alpha - 1.0)
+    pp = e * (alpha + 1.0)
+    v1 = torch.zeros_like(m)
+    v2 = torch.zeros_like(m)
+    v1[:, 0] = (0.5 - k * pm) * m[:, 0]
+    if w > 1:
+        v1[:, 1] = k * (m[:, 1] + pm * m[:, 0]) + (a2e - e2) * v1[:, 0]
+    for x in range(2, w):
+        v1[:, x] = k * (m[:, x] + pm * m[:, x - 1]) + a2e * v1[:, x - 1] - e2 * v1[:, x - 2]
+    v2[:, w - 1] = (0.5 + k * pm) * m[:, w - 1]
+    if w > 1:
+        v2[:, w - 2] = k * ((pp - e2) * m[:, w - 1]) + (a2e - e2) * v2[:, w - 1]
+    for x in range(w - 3, -1, -1):
+        v2[:, x] = k * (pp * m[:, x + 1] - e2 * m[:, x + 2]) + a2e * v2[:, x + 1] - e2 * v2[:, x + 2]
+    return v1 + v2
+
+
+def _recursive_smooth(m: torch.Tensor, sigma: float) -> torch.Tensor:
+    """recursiveSmoothX then recursiveSmoothY (Y via transpose)."""
+    m = _recursive_smooth_x(m, sigma)
+    return _recursive_smooth_x(m.t().contiguous(), sigma).t().contiguous()
+
+
+def compute_corners(image: torch.Tensor, rho: float = 3.0, smooth: str = "recursive") -> torch.Tensor:
     """Harris smallest-eigenvalue corner strength, normalized to ``[0, 1]``.
 
     Args:
         image: ``(C, H, W)`` content image (any channel count; summed over C).
-        rho: Gaussian smoothing std for the second-moment matrix.
+        rho: smoothing std for the second-moment matrix.
+        smooth: ``"recursive"`` (Deriche, bit-faithful to consistencyChecker.cpp)
+            or ``"gaussian"`` (fast separable conv; ~equal output, used for speed
+            in the training inner loop).
     """
     if image.dim() != 3:
         raise ValueError(f"expected (C,H,W) image, got {tuple(image.shape)}")
@@ -67,9 +106,16 @@ def compute_corners(image: torch.Tensor, rho: float = 3.0) -> torch.Tensor:
     dxx = (dx * dx).sum(dim=1, keepdim=True)
     dyy = (dy * dy).sum(dim=1, keepdim=True)
     dxy = (dx * dy).sum(dim=1, keepdim=True)
-    dxx = _gaussian_blur(dxx, rho)
-    dyy = _gaussian_blur(dyy, rho)
-    dxy = _gaussian_blur(dxy, rho)
+    if smooth == "recursive":
+        dxx = _recursive_smooth(dxx[0, 0], rho)[None, None]
+        dyy = _recursive_smooth(dyy[0, 0], rho)[None, None]
+        dxy = _recursive_smooth(dxy[0, 0], rho)[None, None]
+    elif smooth == "gaussian":
+        dxx = _gaussian_blur(dxx, rho)
+        dyy = _gaussian_blur(dyy, rho)
+        dxy = _gaussian_blur(dxy, rho)
+    else:
+        raise ValueError(f"unknown smooth={smooth!r}")
     a, b, c = dxx, dxy, dyy
     temp = 0.5 * (a + c)
     temp2 = (temp * temp + b * b - a * c).clamp_min(0.0)
@@ -196,14 +242,17 @@ def compute_reliability(
     flow2: torch.Tensor,
     content_image: torch.Tensor | None = None,
     rho: float = 3.0,
+    smooth: str = "recursive",
 ) -> torch.Tensor:
     """Convenience: optionally compute the Harris structure, then check.
 
     ``flow1``/``flow2`` are ``(2, H, W)``; ``content_image`` is ``(C, H, W)``.
+    ``smooth`` selects the second-moment smoother: ``"recursive"`` (bit-faithful
+    to the C++ checker) or ``"gaussian"`` (faster, for the training inner loop).
     """
     structure = None
     if content_image is not None:
         # Keep the structure map on the flow's device (the content image may be
         # loaded on a different device than the estimator's flow output).
-        structure = compute_corners(content_image.to(flow1.device), rho=rho)
+        structure = compute_corners(content_image.to(flow1.device), rho=rho, smooth=smooth)
     return check_consistency(flow1, flow2, structure=structure)
