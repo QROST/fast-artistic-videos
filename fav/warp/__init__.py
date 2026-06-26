@@ -9,6 +9,7 @@ from fav.warp.flow_io import (
     dydx_to_uv,
     FLO_MAGIC,
 )
+from fav.warp.grid_sample import warp, warp_masked
 
 __all__ = [
     "read_flo",
@@ -18,4 +19,6 @@ __all__ = [
     "uv_to_dydx",
     "dydx_to_uv",
     "FLO_MAGIC",
+    "warp",
+    "warp_masked",
 ]
