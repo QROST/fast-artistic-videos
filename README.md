@@ -1,5 +1,11 @@
 # fast-artistic-videos
 
+> **2026 PyTorch/MPS port:** a faithful re-implementation of this method that runs
+> on CPU, CUDA, and Apple-Silicon (MPS) for both training and inference now lives
+> in the [`fav/`](fav/) package. See **[docs/fav.md](docs/fav.md)** for setup and
+> usage. The original Torch7/Lua code below is preserved as the reference the port
+> matches.
+
 This is the source code for fast video style transfer described in
 
 **[Artistic style transfer for videos and spherical images](https://lmb.informatik.uni-freiburg.de/Publications/2018/RDB18/)**

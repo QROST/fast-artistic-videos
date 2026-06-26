@@ -1,0 +1,29 @@
+# Simple training (paper baseline). Matches:
+#   th train_video.lua -data_mix video:3,shift:1,zoom_out:1 -num_frame_steps 0:1 \
+#     -num_iterations 60000 -pixel_loss_weight 50 -arch <improved>
+style_image: ""            # path to the style image
+image_model: "self"        # 'self' or a separate single-image model checkpoint
+num_iterations: 60000
+batch_size: 4
+learning_rate: "1e-3"
+checkpoint_name: "checkpoint"
+checkpoint_every: 1000
+model:
+  arch: "c9s1-32,d64,d128,R128,R128,R128,R128,R128,U2,c3s1-64,U2,c9s1-3"
+  use_instance_norm: true
+  padding_type: "reflect-start"
+  tanh_constant: 150.0
+  tv_strength: 1.0e-6
+loss:
+  loss_network: "models/vgg16_caffe.pt"   # converted via `fav convert-vgg`
+  content_layers: [16]
+  style_layers: [4, 9, 16, 23]
+  style_weights: [10.0]
+  style_image_size: 384
+  pixel_loss_weight: 50.0
+data:
+  image_dir: ""            # COCO-style single images for synthetic sources
+  video_dir: ""            # optional real-video clips
+  data_mix: "video:3,shift:1,zoom_out:1"
+  num_frame_steps: "0:1"
+  train_img_size: "256:256"

@@ -1,0 +1,16 @@
+# Spherical/360 stylization defaults (cube-face input).
+model_vid: "checkpoint_vr.pt"
+model_img: "self"
+input_pattern: "frames/frame_%05d-%d.png"   # last %d = cube face id
+flow_pattern: "flow/backward_[%d]_{%d}-%d.flo"
+occlusions_pattern: "flow/reliable_[%d]_{%d}-%d.pgm"
+output_prefix: "stylized/out"
+overlap_pixel_w: 20
+overlap_pixel_h: 20
+out_equi: false
+out_equi_w: 2560
+out_equi_h: 1440
+out_cubemap: false
+occlusions_min_filter: 7
+median_filter: 3
+vr_backend: "py360convert"
