@@ -1,0 +1,12 @@
+# Planar video stylization (fav stylize --config configs/stylize.yaml ...).
+model_vid: "checkpoint.pt"      # trained video model
+model_img: "self"              # 'self' or a separate first-frame model
+input_pattern: "frames/frame_%05d.png"
+flow_pattern: "flow/backward_[%d]_{%d}.flo"
+occlusions_pattern: "flow/reliable_[%d]_{%d}.pgm"
+output_prefix: "stylized/out"
+num_frames: 9999
+continue_with: 1
+occlusions_min_filter: 7
+median_filter: 3
+fill_occlusions: "vgg-mean"

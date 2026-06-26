@@ -121,38 +121,29 @@ def load_yaml(path: str | Path) -> dict:
 
 
 def merge_overrides(cfg: Any, overrides: dict) -> Any:
-    """Return a copy of dataclass ``cfg`` with ``overrides`` applied.
+    """Return a deep copy of dataclass ``cfg`` with ``overrides`` applied.
 
-    Nested dataclasses are merged recursively when the override value is a dict.
-    Unknown keys raise ``KeyError`` so typos surface early.
+    Walks the live instance (rather than its annotations) so nested dataclasses
+    are recognized even under ``from __future__ import annotations``. Override
+    values that are dicts recurse into nested dataclasses; unknown keys raise
+    ``KeyError`` so typos surface early.
     """
-    data = asdict(cfg)
-    _deep_update(data, overrides)
-    return _from_dict(type(cfg), data)
-
-
-def _deep_update(base: dict, updates: dict) -> None:
-    for key, value in updates.items():
-        if key not in base:
-            raise KeyError(f"unknown config key: {key}")
-        if isinstance(value, dict) and isinstance(base[key], dict):
-            _deep_update(base[key], value)
-        else:
-            base[key] = value
-
-
-def _from_dict(cls, data: dict):
+    import copy
     import dataclasses
 
-    if not dataclasses.is_dataclass(cls):
-        return data
-    kwargs = {}
-    for f in dataclasses.fields(cls):
-        val = data.get(f.name, dataclasses.MISSING)
-        if val is dataclasses.MISSING:
-            continue
-        if dataclasses.is_dataclass(f.type) and isinstance(val, dict):
-            kwargs[f.name] = _from_dict(f.type, val)
+    cfg = copy.deepcopy(cfg)
+    _apply(cfg, overrides)
+    return cfg
+
+
+def _apply(obj, updates: dict) -> None:
+    import dataclasses
+
+    for key, value in updates.items():
+        if not hasattr(obj, key):
+            raise KeyError(f"unknown config key: {key}")
+        current = getattr(obj, key)
+        if isinstance(value, dict) and dataclasses.is_dataclass(current):
+            _apply(current, value)
         else:
-            kwargs[f.name] = val
-    return cls(**kwargs)
+            setattr(obj, key, value)

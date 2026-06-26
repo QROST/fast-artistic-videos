@@ -7,6 +7,7 @@ from fav.flow.estimator import (
     flow_filename,
     occlusion_filename,
     compute_pair,
+    write_pair,
 )
 
 __all__ = [
@@ -16,6 +17,7 @@ __all__ = [
     "flow_filename",
     "occlusion_filename",
     "compute_pair",
+    "write_pair",
     "build_estimator",
 ]
 
