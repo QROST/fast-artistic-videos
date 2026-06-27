@@ -109,6 +109,22 @@ class StylizeConfig:
 
 
 @dataclass
+class DiffusionConfig:
+    """Phase-3 diffusion + per-style-LoRA stylizer config (runs on M5 Max/MPS)."""
+    base_model: str = "stabilityai/stable-diffusion-xl-base-1.0"
+    controlnet: str = ""   # hub id / path of the flow+structure ControlNet
+    lora_path: str = ""    # per-style LoRA adapter
+    style_ref: str = ""    # style reference image (IP-Adapter) or prompt
+    controls: tuple[str, ...] = ("warped_prev_masked", "cert", "structure")
+    strength: float = 0.6              # img2img denoising strength
+    num_inference_steps: int = 20
+    guidance_scale: float = 5.0
+    occlusions_min_filter: int = 7
+    precision: str = "fp16"            # diffusion default on MPS/CUDA
+    device: str | None = None
+
+
+@dataclass
 class VRConfig(StylizeConfig):
     overlap_pixel_w: int = 20
     overlap_pixel_h: int = 20
