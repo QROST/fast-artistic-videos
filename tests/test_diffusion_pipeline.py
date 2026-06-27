@@ -57,6 +57,38 @@ def test_video_loop_temporal_consistency():
         assert diff < 1e-3
 
 
+class _RecordingStylizer:
+    """Returns a distinct constant per frame and records the conditioning it gets,
+    so we can verify the loop feeds the PREVIOUS output (not a tautology)."""
+
+    def __init__(self):
+        self.conds = []
+        self.n = 0
+
+    def stylize_first(self, content_rgb, style_ref=None):
+        self.n += 1
+        return torch.full_like(content_rgb, 0.123)
+
+    def stylize_next(self, content_rgb, conditioning, style_ref=None):
+        self.conds.append(conditioning)
+        self.n += 1
+        return torch.full_like(content_rgb, 0.05 * self.n)  # distinct, != init image
+
+
+def test_loop_feeds_previous_output_into_conditioning():
+    s = _RecordingStylizer()
+    torch.manual_seed(2)
+    base = torch.rand(1, 3, 32, 32)
+    imgs, flows, certs = make_shift(base, num=2, displ=(3, 2))
+    outs = stylize_video_diffusion(s, imgs, flows, certs, occlusions_min_filter=1)
+    # Each frame's conditioning must warp the actual PREVIOUS output by that flow —
+    # verifies real loop wiring (the recorded outputs are constants unrelated to
+    # the init-image formula, so this can't pass by construction).
+    for i in range(1, len(outs)):
+        cond = s.conds[i - 1]
+        assert torch.allclose(cond.warped_prev, warp(outs[i - 1], flows[i - 1]), atol=1e-5)
+
+
 def test_build_stylizer_dummy_and_unknown():
     assert isinstance(build_stylizer(backend="dummy"), DummyDiffusionStylizer)
     with pytest.raises(ValueError):

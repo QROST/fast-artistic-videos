@@ -116,6 +116,7 @@ class DiffusionConfig:
     lora_path: str = ""    # per-style LoRA adapter
     style_ref: str = ""    # style reference image (IP-Adapter) or prompt
     prompt: str = ""       # text prompt describing the style (used if no IP-Adapter)
+    negative_prompt: str = ""  # negative prompt (CFG is on at guidance_scale>1)
     control: str = "structure"  # which conditioning feeds the ControlNet
     controls: tuple[str, ...] = ("warped_prev_masked", "cert", "structure")
     strength: float = 0.6              # img2img denoising strength (subsequent frames)
@@ -124,7 +125,7 @@ class DiffusionConfig:
     num_inference_steps: int = 20
     guidance_scale: float = 5.0
     occlusions_min_filter: int = 7
-    precision: str = "fp16"            # diffusion default on MPS/CUDA
+    precision: str = "bf16"            # bf16 is the safer default on MPS (M5 Max)
     device: str | None = None
 
 
