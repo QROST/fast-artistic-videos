@@ -13,6 +13,7 @@ from fav.vr.seams import (
     make_border_prior,
     make_border_cert,
     blend_border,
+    reblend_all_faces,
     seam_prior_and_cert,
 )
 from fav.vr.stylize_vr import (
@@ -33,6 +34,7 @@ __all__ = [
     "make_border_prior",
     "make_border_cert",
     "blend_border",
+    "reblend_all_faces",
     "seam_prior_and_cert",
     "stylize_faces_over_time",
     "stylize_faces_seams_over_time",

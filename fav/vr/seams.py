@@ -272,36 +272,94 @@ def blend_border(geom: SeamGeometry, p: int, temporal_prior: torch.Tensor,
     return temporal_prior * anti_mask + border * mask
 
 
+# Neighbour table for the post-timestep re-blend (``blend_other_sides``): for each
+# processing position, the four neighbours to warp into its overlap, as
+# ``(segment_index, rotation, warp_map_name)``. ``rotation`` is one of
+# ``None / 'r90' / 'rm90' / 'r180'``. Indices are 0-based processing positions.
+_REBLEND_NEIGHBOURS = {
+    0: [(1, None, "right"), (2, None, "left"), (4, "r180", "bottom"), (5, "r180", "top")],
+    1: [(0, None, "left"), (3, None, "right"), (4, "rm90", "bottom"), (5, "r90", "top")],
+    2: [(0, None, "right"), (3, None, "left"), (4, "r90", "bottom"), (5, "rm90", "top")],
+    3: [(1, None, "left"), (2, None, "right"), (4, None, "bottom"), (5, None, "top")],
+    4: [(0, "r180", "bottom"), (1, "r90", "left"), (2, "rm90", "right"), (3, None, "top")],
+    5: [(0, "r180", "top"), (1, "rm90", "left"), (2, "r90", "right"), (3, None, "bottom")],
+}
+
+_ROTATIONS = {None: lambda t: t, "r90": rotate90, "rm90": rotate_minus90, "r180": rotate180}
+
+
+def reblend_all_faces(geom: SeamGeometry, segments: list) -> list:
+    """Re-blend every final face with its four warped neighbours (``blend_other_sides``).
+
+    After a timestep's 6 faces are stylized, each face is blended with all four
+    of its neighbours over the ``grad_mask_all`` overlap (neighbours combined via
+    ``combineSides`` = sum of warps divided by ``mask_all_div``). The result feeds
+    both the next timestep's temporal prior and the saved output, suppressing
+    residual seams the single-pass border prior leaves behind.
+
+    ``segments`` is the list of 6 stylized faces in processing order (``(1,C,H,W)``
+    each). Returns a new list of 6 re-blended faces in the same order.
+    """
+    maps = {"left": geom.warp_map_left, "right": geom.warp_map_right,
+            "top": geom.warp_map_top, "bottom": geom.warp_map_bottom}
+    div = geom.mask_all_div
+    grad = geom.grad_mask_all
+    anti = 1.0 - grad
+    out = []
+    for p in range(6):
+        border = None
+        for seg_idx, rot, map_name in _REBLEND_NEIGHBOURS[p]:
+            term = warp(_ROTATIONS[rot](segments[seg_idx]), maps[map_name]) / div
+            border = term if border is None else border + term
+        out.append(segments[p] * anti + border * grad)
+    return out
+
+
 def seam_prior_and_cert(geom: SeamGeometry, segments: list, p: int,
                         temporal_prior: torch.Tensor | None,
                         occlusion_cert: torch.Tensor | None,
-                        blend: bool = True):
+                        blend: bool = True, occlusions_min_filter: int = 7):
     """High-level orchestrator mirroring ``func_make_last_frame_warped`` +
     ``func_load_cert`` for one face.
 
+    The certainty is assembled exactly as the legacy core does: the occlusion map
+    and the border strips are combined (``max``) *first*, then min-filtered once,
+    and that single combined+filtered cert is used both as the blend weight's
+    ``1-cert`` term and as the returned model-input mask. So on a covered seam
+    strip ``cert == 1 -> cert_inv == 0`` and the blend collapses to the gradient
+    ramp, matching the reference.
+
     Args:
         segments: already-stylized faces this timestep (processing order),
-            ``(1,C,H,W)`` each.
+            ``(1,C,H,W)`` each (in RGB space, as in the legacy ``last_segments``).
         p: processing position of the current face (``0..5``).
         temporal_prior: the current face's previous output warped by its own
             optical flow (``(1,C,H,W)``), or ``None`` for the very first frame.
-        occlusion_cert: the temporal occlusion certainty (``(1,1,H,W)``) for this
-            face, or ``None`` (treated as all-zero) on the first frame.
+        occlusion_cert: the *raw* temporal occlusion certainty (``(1,1,H,W)``), or
+            ``None`` (treated as all-zero) on the first frame. Not pre-filtered --
+            the min-filter is applied here to the combined cert.
         blend: blend the border into the temporal prior (legacy ``i >= 7``); when
             ``False`` (first timestep) the prior is just the raw border.
+        occlusions_min_filter: erosion radius applied to the combined cert.
 
     Returns:
         ``(prior, cert)``: the prior to feed as the warped-previous input and the
-        combined certainty (occlusion ``max`` border).
+        combined+min-filtered certainty.
     """
+    from fav.occlusion.filters import min_filter
+
     border, _ = make_border_prior(geom, segments, p)
     cert_border = make_border_cert(geom, p)
 
     if blend and temporal_prior is not None:
-        cert_t = occlusion_cert if occlusion_cert is not None else torch.zeros_like(cert_border)
-        prior = blend_border(geom, p, temporal_prior, border, cert_t)
-        cert = torch.maximum(cert_t, cert_border)
+        occ = occlusion_cert if occlusion_cert is not None else torch.zeros_like(cert_border)
+        cert = torch.maximum(occ, cert_border)
+        if occlusions_min_filter and occlusions_min_filter > 1:
+            cert = min_filter(cert, occlusions_min_filter)
+        prior = blend_border(geom, p, temporal_prior, border, cert)
     else:
         prior = border
         cert = cert_border
+        if occlusions_min_filter and occlusions_min_filter > 1:
+            cert = min_filter(cert, occlusions_min_filter)
     return prior, cert

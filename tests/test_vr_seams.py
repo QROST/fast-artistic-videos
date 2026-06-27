@@ -14,6 +14,7 @@ from fav.vr.seams import (
     make_border_prior,
     make_border_cert,
     blend_border,
+    reblend_all_faces,
     seam_prior_and_cert,
 )
 from fav.vr.cubemap import PROC_ORDER
@@ -185,7 +186,9 @@ def test_blend_keeps_temporal_in_interior_when_certain():
 def test_seam_prior_and_cert_first_timestep_is_raw_border():
     g = _geom()
     segs = _segments(1)
-    prior, cert = seam_prior_and_cert(g, segs, 1, None, None, blend=False)
+    # occlusions_min_filter=1 disables erosion so cert == the raw border cert.
+    prior, cert = seam_prior_and_cert(g, segs, 1, None, None, blend=False,
+                                      occlusions_min_filter=1)
     border, _ = make_border_prior(g, segs, 1)
     torch.testing.assert_close(prior, border)
     torch.testing.assert_close(cert, make_border_cert(g, 1))
@@ -196,10 +199,46 @@ def test_seam_prior_and_cert_blends_and_marks_border_certain():
     segs = _segments(1)
     temporal = torch.zeros(1, 3, 64, 64)
     occ = torch.zeros(1, 1, 64, 64)  # everything occluded temporally
-    prior, cert = seam_prior_and_cert(g, segs, 1, temporal, occ, blend=True)
+    prior, cert = seam_prior_and_cert(g, segs, 1, temporal, occ, blend=True,
+                                      occlusions_min_filter=1)
     # Border strip is certain even though the temporal occlusion was all-zero.
     assert float((cert * g.mask_left).sum()) > 0
+    # cert = combined(occlusion max border); min_filter=1 leaves it unchanged.
     torch.testing.assert_close(cert, torch.maximum(occ, make_border_cert(g, 1)))
+
+
+def test_seam_prior_and_cert_combines_before_min_filter():
+    # The min-filter must erode the COMBINED cert (occlusion max border), so a
+    # covered border pixel adjacent to occluded interior gets eroded -- matching
+    # the legacy core (filter applied once to the combined cert).
+    g = _geom()
+    segs = _segments(1)
+    temporal = torch.zeros(1, 3, 64, 64)
+    occ = torch.zeros(1, 1, 64, 64)
+    _, cert7 = seam_prior_and_cert(g, segs, 1, temporal, occ, blend=True,
+                                   occlusions_min_filter=7)
+    _, cert1 = seam_prior_and_cert(g, segs, 1, temporal, occ, blend=True,
+                                   occlusions_min_filter=1)
+    # Erosion (r=7) shrinks the certain region vs the unfiltered combined cert.
+    assert float(cert7.sum()) < float(cert1.sum())
+
+
+def test_reblend_all_faces_smooths_with_neighbors():
+    g = _geom()
+    # 6 distinct constant faces; the re-blend pulls neighbour content into each
+    # face's grad_mask_all overlap while leaving the deep interior untouched.
+    segs = [torch.full((1, 3, 64, 64), float(i + 1)) for i in range(6)]
+    out = reblend_all_faces(g, segs)
+    assert len(out) == 6
+    for p in range(6):
+        assert out[p].shape == (1, 3, 64, 64)
+        # Deep interior (grad_mask_all == 0 there) keeps the original face value.
+        interior = g.grad_mask_all[:, :, 28:36, 28:36] < 1e-6
+        assert torch.all(interior)
+        torch.testing.assert_close(out[p][:, :, 28:36, 28:36], segs[p][:, :, 28:36, 28:36])
+    # The front face (p=0) overlap should now carry some neighbour (!=1.0) content.
+    front_overlap = out[0][(g.grad_mask_all > 0.3).expand_as(out[0])]
+    assert float(front_overlap.std()) > 0
 
 
 # --- end-to-end loop -------------------------------------------------------

@@ -18,10 +18,10 @@ from __future__ import annotations
 import torch
 
 from fav.infer.core import stylize_first_frame, stylize_sequence, stylize_with_prior
-from fav.occlusion.filters import min_filter
+from fav.occlusion.filters import median_filter
 from fav.preprocess import get_methods
 from fav.vr.cubemap import PROC_ORDER, cubefaces_to_equirect
-from fav.vr.seams import SeamGeometry, seam_prior_and_cert
+from fav.vr.seams import SeamGeometry, reblend_all_faces, seam_prior_and_cert
 from fav.warp.grid_sample import warp
 
 
@@ -84,23 +84,28 @@ def stylize_faces_seams_over_time(
     cross-face *border prior* warped from the neighbours already stylized this
     timestep (see :mod:`fav.vr.seams`). The border is blended into the face's own
     temporal prior (its previous output warped by its optical flow) over the
-    overlap strip, and that strip is marked certain.
+    overlap strip, and that strip is marked certain. After all 6 faces are done,
+    a second :func:`~fav.vr.seams.reblend_all_faces` pass re-blends every face
+    with its four neighbours; that re-blended result is what carries to the next
+    timestep's temporal prior *and* is returned (median-filtered) as the output,
+    matching the legacy ``blend_other_sides`` step.
 
-    Args mirror :func:`stylize_faces_over_time`; ``overlap_w``/``overlap_h`` are
-    the cube-face overlap used to build the seam geometry.
-    Returns a list over time of ``{face_id: (1,3,H,W) stylized rgb}``.
+    All seam geometry runs in deprocessed RGB space (as the legacy
+    ``last_segments`` do); the blended prior is preprocessed just before the
+    network. ``overlap_w``/``overlap_h`` are the cube-face overlap used to build
+    the seam geometry. Returns a list over time of ``{face_id: (1,3,H,W) rgb}``.
     """
     preprocess_fn, _ = get_methods(preprocessing)
     face_ids = sorted(PROC_ORDER)
     T = len(faces_seq)
     out_seq: list[dict[int, torch.Tensor]] = [dict() for _ in range(T)]
-    # Per-face previous output in pre (VGG) space, keyed by face id.
-    prev_pre: dict[int, torch.Tensor] = {}
+    # Per-face previous output in RGB space (the re-blended result), keyed by id.
+    prev_rgb: dict[int, torch.Tensor] = {}
 
     geom = None
     for t in range(T):
-        # `segments` holds this timestep's stylized faces in processing order
-        # (pre-space), so neighbour lookups in fav.vr.seams resolve correctly.
+        # `segments` holds this timestep's stylized faces (RGB) in processing
+        # order, so neighbour lookups in fav.vr.seams resolve correctly.
         segments: list = []
         for p, face in enumerate(PROC_ORDER):
             frame_rgb = faces_seq[t][face]
@@ -110,49 +115,53 @@ def stylize_faces_seams_over_time(
                     hplus, wplus, overlap_w, overlap_h,
                     device=frame_rgb.device, dtype=frame_rgb.dtype,
                 )
-            if t == 0:
-                # First timestep: no temporal prior. The first face (front) has no
-                # neighbour either, so it is a plain first-frame stylization; the
-                # rest get the raw border prior from this timestep's neighbours.
-                if p == 0:
-                    out_rgb, out_pre = stylize_first_frame(
-                        model_vid, model_img, frame_rgb, preprocessing,
-                        fill_occlusions, precision,
+            if t == 0 and p == 0:
+                # Very first face of the first timestep: a plain single-image
+                # stylization (no temporal prior, no neighbour processed yet).
+                out_rgb, _ = stylize_first_frame(
+                    model_vid, model_img, frame_rgb, preprocessing,
+                    fill_occlusions, precision,
+                )
+            else:
+                if t == 0:
+                    # First timestep, later faces: raw border prior, no temporal.
+                    prior_rgb, cert = seam_prior_and_cert(
+                        geom, segments, p, None, None, blend=False,
+                        occlusions_min_filter=occlusions_min_filter,
                     )
                 else:
-                    prior, cert = seam_prior_and_cert(geom, segments, p, None, None, blend=False)
-                    out_rgb, out_pre = stylize_with_prior(
-                        model_vid, frame_rgb, prior, cert, preprocessing,
-                        occlusions_min_filter, fill_occlusions, precision,
+                    # Temporal prior: this face's previous (re-blended) output
+                    # warped by its flow, blended with the cross-face border.
+                    flow = flows_seq[t - 1][face]
+                    temporal_prior = warp(prev_rgb[face], flow)
+                    prior_rgb, cert = seam_prior_and_cert(
+                        geom, segments, p, temporal_prior, certs_seq[t - 1][face],
+                        blend=True, occlusions_min_filter=occlusions_min_filter,
                     )
-            else:
-                # Temporal prior: previous output of THIS face warped by its flow.
-                flow = flows_seq[t - 1][face]
-                cert_occ = min_filter(certs_seq[t - 1][face], occlusions_min_filter)
-                temporal_prior = warp(prev_pre[face], flow)
-                prior, cert = seam_prior_and_cert(
-                    geom, segments, p, temporal_prior, cert_occ, blend=True,
+                # The cert is already combined (occlusion max border) and
+                # min-filtered, so disable the filter inside the step; preprocess
+                # the RGB prior to feed the network's warped-previous channels.
+                out_rgb, _ = stylize_with_prior(
+                    model_vid, frame_rgb, preprocess_fn(prior_rgb), cert,
+                    preprocessing, occlusions_min_filter, fill_occlusions,
+                    precision, apply_min_filter=False,
                 )
-                # cert already has the occlusion min-filter folded into cert_occ;
-                # the border strips are certain, so no further filtering.
-                out_rgb, out_pre = stylize_with_prior(
-                    model_vid, frame_rgb, prior, cert, preprocessing,
-                    occlusions_min_filter, fill_occlusions, precision,
-                    apply_min_filter=False,
-                )
-            out_rgb = _post(out_rgb, median_filter_size)
-            segments.append(out_pre)
-            prev_pre[face] = out_pre
-            out_seq[t][face] = out_rgb
+            segments.append(out_rgb)
+
+        # Second pass: re-blend every face with its 4 neighbours. This feeds both
+        # the next timestep's temporal prior and the (median-filtered) output.
+        reblended = reblend_all_faces(geom, segments)
+        for p, face in enumerate(PROC_ORDER):
+            prev_rgb[face] = reblended[p]
+            out_seq[t][face] = _post(reblended[p], median_filter_size)
     assert set(face_ids) == set(PROC_ORDER)
     return out_seq
 
 
 def _post(out_rgb, median_filter_size):
-    from fav.occlusion.filters import median_filter
     if median_filter_size and median_filter_size > 1:
         return median_filter(out_rgb[0], median_filter_size).unsqueeze(0).clamp(0, 1)
-    return out_rgb
+    return out_rgb.clamp(0, 1)
 
 
 # Map numeric face ids (1..6) to py360convert's dict keys for equirect assembly.
