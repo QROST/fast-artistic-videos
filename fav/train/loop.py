@@ -57,6 +57,7 @@ def train_step(
     image_model=None,
     device="cpu",
     scaler=None,
+    aux_terms=None,
 ):
     """One optimization step. ``batch`` = ``(source, imgs_raw, flows, certs)``.
 
@@ -107,6 +108,18 @@ def train_step(
         tv = tv_penalty(out2, cfg.model.tv_strength)
         loss = percep + pixel + tv
 
+        # Optional auxiliary perceptual terms (LPIPS/DINO), on deprocessed RGB.
+        aux_total = 0.0
+        if aux_terms:
+            _, deprocess_fn = get_methods(cfg.model.preprocessing)
+            out_rgb = deprocess_fn(out2).clamp(0, 1)
+            content_rgb = deprocess_fn(content_target).clamp(0, 1)
+            aux_loss = out2.new_zeros(())
+            for weight, fn in aux_terms:
+                aux_loss = aux_loss + weight * fn(out_rgb, content_rgb)
+            loss = loss + aux_loss
+            aux_total = float(aux_loss.detach())
+
     if scaler is not None:
         scaler.scale(loss).backward()
         scaler.step(optimizer)
@@ -120,6 +133,7 @@ def train_step(
         "percep": float(percep.detach()),
         "pixel": float(pixel.detach()),
         "tv": float(tv.detach()),
+        "aux": aux_total,
         "content": perceptual.total_content_loss,
         "style": perceptual.total_style_loss,
         "source": source,
@@ -147,13 +161,19 @@ def train(model, perceptual, data_fn, cfg, device="cpu", image_model=None, max_i
     if needs_grad_scaler(device, getattr(cfg, "precision", "fp32")):
         scaler = torch.amp.GradScaler(torch.device(device).type)
 
+    # Optional auxiliary perceptual terms (empty unless lpips/dino weights set).
+    from fav.losses.aux import build_aux_terms
+
+    aux_terms = build_aux_terms(cfg.loss, device)
+
     n = max_iters if max_iters is not None else cfg.num_iterations
     history = []
     for it in range(1, n + 1):
         for g in optimizer.param_groups:
             g["lr"] = value_at(lr_sched, it)
         batch = data_fn(it)
-        metrics = train_step(model, perceptual, optimizer, batch, cfg, image_model, device, scaler)
+        metrics = train_step(model, perceptual, optimizer, batch, cfg, image_model, device,
+                             scaler, aux_terms)
         metrics["iter"] = it
         history.append(metrics)
         if on_step is not None:
