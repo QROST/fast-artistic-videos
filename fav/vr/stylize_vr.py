@@ -5,19 +5,24 @@ the planar engine (warp the previous frame's same face by its optical flow). The
 6 faces are processed in the paper's order. Equirectangular output is assembled
 with ``py360convert``.
 
-Cross-face seam consistency (the perspective-map border priors + gradient
-blending from ``fast_artistic_video_vr.lua``) is the remaining VR refinement for
-this phase; the geometry it needs is already provided in
-``fav.vr.perspective`` / ``fav.vr.cubemap`` and the temporal path below gives the
-primary (frame-to-frame) consistency.
+For cross-face seam consistency, :func:`stylize_faces_seams_over_time` processes
+faces *time-major* (all 6 faces of a timestep before the next) so that each
+face's seam strip can be primed from its already-stylized neighbours of the same
+timestep, blended into the per-face temporal prior with the gradient masks ported
+in :mod:`fav.vr.seams`. :func:`stylize_faces_over_time` keeps the simpler
+temporal-only path (each face stylized independently over time).
 """
 
 from __future__ import annotations
 
 import torch
 
-from fav.infer.core import stylize_sequence
+from fav.infer.core import stylize_first_frame, stylize_sequence, stylize_with_prior
+from fav.occlusion.filters import min_filter
+from fav.preprocess import get_methods
 from fav.vr.cubemap import PROC_ORDER, cubefaces_to_equirect
+from fav.vr.seams import SeamGeometry, seam_prior_and_cert
+from fav.warp.grid_sample import warp
 
 
 def stylize_faces_over_time(
@@ -56,6 +61,98 @@ def stylize_faces_over_time(
             out_seq[t][face] = styled[t]
     assert set(face_ids) == set(PROC_ORDER)
     return out_seq
+
+
+def stylize_faces_seams_over_time(
+    model_vid,
+    faces_seq: list[dict[int, torch.Tensor]],
+    flows_seq: list[dict[int, torch.Tensor]],
+    certs_seq: list[dict[int, torch.Tensor]],
+    overlap_w: int = 20,
+    overlap_h: int = 20,
+    model_img="self",
+    preprocessing: str = "vgg",
+    occlusions_min_filter: int = 7,
+    median_filter_size: int = 3,
+    fill_occlusions: str = "vgg-mean",
+    precision: str = "fp32",
+) -> list[dict[int, torch.Tensor]]:
+    """Seam-consistent cube-face video stylization (ports ``fast_artistic_video_vr``).
+
+    Processes time-major: at each timestep the 6 faces are stylized in
+    :data:`PROC_ORDER`, and every face after the first is primed with a
+    cross-face *border prior* warped from the neighbours already stylized this
+    timestep (see :mod:`fav.vr.seams`). The border is blended into the face's own
+    temporal prior (its previous output warped by its optical flow) over the
+    overlap strip, and that strip is marked certain.
+
+    Args mirror :func:`stylize_faces_over_time`; ``overlap_w``/``overlap_h`` are
+    the cube-face overlap used to build the seam geometry.
+    Returns a list over time of ``{face_id: (1,3,H,W) stylized rgb}``.
+    """
+    preprocess_fn, _ = get_methods(preprocessing)
+    face_ids = sorted(PROC_ORDER)
+    T = len(faces_seq)
+    out_seq: list[dict[int, torch.Tensor]] = [dict() for _ in range(T)]
+    # Per-face previous output in pre (VGG) space, keyed by face id.
+    prev_pre: dict[int, torch.Tensor] = {}
+
+    geom = None
+    for t in range(T):
+        # `segments` holds this timestep's stylized faces in processing order
+        # (pre-space), so neighbour lookups in fav.vr.seams resolve correctly.
+        segments: list = []
+        for p, face in enumerate(PROC_ORDER):
+            frame_rgb = faces_seq[t][face]
+            if geom is None:
+                _, _, hplus, wplus = frame_rgb.shape
+                geom = SeamGeometry.build(
+                    hplus, wplus, overlap_w, overlap_h,
+                    device=frame_rgb.device, dtype=frame_rgb.dtype,
+                )
+            if t == 0:
+                # First timestep: no temporal prior. The first face (front) has no
+                # neighbour either, so it is a plain first-frame stylization; the
+                # rest get the raw border prior from this timestep's neighbours.
+                if p == 0:
+                    out_rgb, out_pre = stylize_first_frame(
+                        model_vid, model_img, frame_rgb, preprocessing,
+                        fill_occlusions, precision,
+                    )
+                else:
+                    prior, cert = seam_prior_and_cert(geom, segments, p, None, None, blend=False)
+                    out_rgb, out_pre = stylize_with_prior(
+                        model_vid, frame_rgb, prior, cert, preprocessing,
+                        occlusions_min_filter, fill_occlusions, precision,
+                    )
+            else:
+                # Temporal prior: previous output of THIS face warped by its flow.
+                flow = flows_seq[t - 1][face]
+                cert_occ = min_filter(certs_seq[t - 1][face], occlusions_min_filter)
+                temporal_prior = warp(prev_pre[face], flow)
+                prior, cert = seam_prior_and_cert(
+                    geom, segments, p, temporal_prior, cert_occ, blend=True,
+                )
+                # cert already has the occlusion min-filter folded into cert_occ;
+                # the border strips are certain, so no further filtering.
+                out_rgb, out_pre = stylize_with_prior(
+                    model_vid, frame_rgb, prior, cert, preprocessing,
+                    occlusions_min_filter, fill_occlusions, precision,
+                    apply_min_filter=False,
+                )
+            out_rgb = _post(out_rgb, median_filter_size)
+            segments.append(out_pre)
+            prev_pre[face] = out_pre
+            out_seq[t][face] = out_rgb
+    assert set(face_ids) == set(PROC_ORDER)
+    return out_seq
+
+
+def _post(out_rgb, median_filter_size):
+    from fav.occlusion.filters import median_filter
+    if median_filter_size and median_filter_size > 1:
+        return median_filter(out_rgb[0], median_filter_size).unsqueeze(0).clamp(0, 1)
+    return out_rgb
 
 
 # Map numeric face ids (1..6) to py360convert's dict keys for equirect assembly.

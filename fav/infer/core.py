@@ -66,6 +66,31 @@ def stylize_next_frame(model_vid, prev_out_pre, frame_rgb, flow_dydx, cert,
 
 
 @torch.no_grad()
+def stylize_with_prior(model_vid, frame_rgb, prior_pre, cert,
+                       preprocessing="vgg", occlusions_min_filter=7,
+                       fill_occlusions="vgg-mean", precision="fp32",
+                       apply_min_filter=True):
+    """Stylize a frame from an *already-built* prior in VGG (pre) space.
+
+    Unlike :func:`stylize_next_frame` this does not warp anything itself -- the
+    caller supplies ``prior_pre`` (the warped/blended previous output) and the
+    matching ``cert``. Used by the VR seam loop, which builds a cross-face prior.
+    Returns ``(out_rgb, out_pre)``.
+    """
+    preprocess_fn, deprocess_fn = get_methods(preprocessing)
+    frame_pre = preprocess_fn(frame_rgb)
+    if apply_min_filter:
+        cert = min_filter(cert, occlusions_min_filter)
+    warped_masked = prior_pre * cert
+    fill = _fill(cert, fill_occlusions, preprocess_fn)
+    inp = torch.cat([frame_pre, warped_masked + fill, cert], dim=1)
+    with autocast_context(frame_pre.device, precision):
+        out_pre = model_vid(inp)
+    out_pre = out_pre.float()
+    return deprocess_fn(out_pre).clamp(0, 1), out_pre
+
+
+@torch.no_grad()
 def stylize_sequence(model_vid, frames_rgb, flows, certs, model_img="self",
                      preprocessing="vgg", occlusions_min_filter=7, median_filter_size=3,
                      fill_occlusions="vgg-mean", precision="fp32"):
