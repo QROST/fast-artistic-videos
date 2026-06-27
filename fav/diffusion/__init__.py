@@ -13,6 +13,13 @@ from fav.diffusion.conditioning import (
     sobel_edges,
     stack_controls,
 )
+from fav.diffusion.pipeline import (
+    DiffusionStylizer,
+    DummyDiffusionStylizer,
+    SDXLControlNetStylizer,
+    stylize_video_diffusion,
+    build_stylizer,
+)
 
 __all__ = [
     "ConditioningBundle",
@@ -21,4 +28,9 @@ __all__ = [
     "flow_to_rgb",
     "sobel_edges",
     "stack_controls",
+    "DiffusionStylizer",
+    "DummyDiffusionStylizer",
+    "SDXLControlNetStylizer",
+    "stylize_video_diffusion",
+    "build_stylizer",
 ]
