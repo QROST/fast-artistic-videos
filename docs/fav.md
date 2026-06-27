@@ -69,6 +69,19 @@ Defaults equal the paper settings (Adam 1e-3, batch 4, content relu3_3, style
 relu1_2/2_2/3_3/4_3, `tanh×150`, TV 1e-6). The mixed config uses the multi-frame
 recurrent schedule `0:1,50000:2,60000:4`. Each run produces one `.pt` per style.
 
+#### Optional stronger perceptual loss (Phase 2)
+
+Layer an LPIPS or DINOv2 content-fidelity term on top of the faithful VGG
+perceptual + Gram loss (both default to 0 = off, so the baseline is unchanged):
+
+```bash
+fav train ... loss.lpips_weight=1.0      # pip install lpips
+fav train ... loss.dino_weight=0.5       # torch.hub dinov2 (needs internet)
+```
+
+These are additive auxiliary terms on the deprocessed RGB output; the VGG Gram
+style loss (which drives the actual stylization) is untouched.
+
 ## Stylize a video
 
 ```bash

@@ -37,6 +37,9 @@ class LossConfig:
     pixel_loss_type: str = "L2"      # L2|L1|SmoothL1
     pixel_loss_weight: float = 50.0  # raise to 100 for mixed/multi-frame training
     percep_loss_weight: float = 1.0
+    # Phase-2 optional auxiliary perceptual terms (0 = off = faithful default).
+    lpips_weight: float = 0.0   # LPIPS distance (needs `pip install lpips`)
+    dino_weight: float = 0.0    # DINOv2 feature L2 (needs torch.hub / internet)
 
 
 @dataclass
