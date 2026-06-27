@@ -63,9 +63,8 @@ def build_data_fn(cfg, device="cpu"):
         from fav.data.video_clips import VideoClipsSource
         from fav.flow import build_estimator
 
-        video_source = VideoClipsSource(
-            cfg.data.video_dir, build_estimator(cfg.data.flow_backend), crop=crop
-        )
+        est = build_estimator(cfg.data.flow_backend, model=cfg.data.flow_model or None)
+        video_source = VideoClipsSource(cfg.data.video_dir, est, crop=crop)
 
     gen = torch.Generator().manual_seed(cfg.seed) if cfg.seed else None
 
@@ -133,11 +132,11 @@ def run_train(cfg, device=None, max_iters=None):
 
 
 def run_compute_flow(frames_dir, out_dir, backend="raft", pattern="frame_%05d.png", start=1,
-                     estimator=None):
+                     estimator=None, model=None):
     from fav.flow import build_estimator, compute_pair, write_pair
     from fav.data.io_utils import load_rgb
 
-    est = estimator if estimator is not None else build_estimator(backend)
+    est = estimator if estimator is not None else build_estimator(backend, model=model)
 
     def load(i):
         p = Path(frames_dir) / (pattern % i)
@@ -158,7 +157,8 @@ def run_compute_flow(frames_dir, out_dir, backend="raft", pattern="frame_%05d.pn
     return written
 
 
-def run_build_dataset(video_dir, out_dir, backend="raft", pattern="frame_%05d.png", start=1):
+def run_build_dataset(video_dir, out_dir, backend="raft", pattern="frame_%05d.png", start=1,
+                      model=None):
     """Precompute flow + occlusion assets for every clip subdir under video_dir.
 
     Mirrors video_dataset/make_*: each clip's assets are written under
@@ -169,7 +169,7 @@ def run_build_dataset(video_dir, out_dir, backend="raft", pattern="frame_%05d.pn
 
     root = Path(video_dir)
     clips = [p for p in sorted(root.iterdir()) if p.is_dir()] or [root]
-    est = build_estimator(backend)  # reuse one estimator across clips
+    est = build_estimator(backend, model=model)  # reuse one estimator across clips
     total = 0
     for clip in clips:
         sub_out = Path(out_dir) / clip.name if clip is not root else Path(out_dir)
@@ -283,14 +283,16 @@ def main(argv=None):
     p_flow = sub.add_parser("compute-flow", help="compute .flo + reliable .pgm for a frame dir")
     p_flow.add_argument("--frames", required=True)
     p_flow.add_argument("--out", required=True)
-    p_flow.add_argument("--backend", default="raft")
+    p_flow.add_argument("--backend", default="raft", help="raft|sea_raft|flowformer|ptlflow|...")
+    p_flow.add_argument("--model", default=None, help="specific model name (raft/ptlflow)")
     p_flow.add_argument("--pattern", default="frame_%05d.png")
     p_flow.add_argument("--start", type=int, default=1)
 
     p_ds = sub.add_parser("build-dataset", help="precompute flow+occlusion assets for clip subdirs")
     p_ds.add_argument("--video", required=True, help="dir of clip subdirectories")
     p_ds.add_argument("--out", required=True)
-    p_ds.add_argument("--backend", default="raft")
+    p_ds.add_argument("--backend", default="raft", help="raft|sea_raft|flowformer|ptlflow|...")
+    p_ds.add_argument("--model", default=None, help="specific model name (raft/ptlflow)")
     p_ds.add_argument("--pattern", default="frame_%05d.png")
     p_ds.add_argument("--start", type=int, default=1)
 
@@ -314,11 +316,13 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     if args.cmd == "compute-flow":
-        n = run_compute_flow(args.frames, args.out, args.backend, args.pattern, args.start)
+        n = run_compute_flow(args.frames, args.out, args.backend, args.pattern, args.start,
+                             model=args.model)
         print(f"wrote flow/occlusion for {n} frame pairs")
         return
     if args.cmd == "build-dataset":
-        n = run_build_dataset(args.video, args.out, args.backend, args.pattern, args.start)
+        n = run_build_dataset(args.video, args.out, args.backend, args.pattern, args.start,
+                              model=args.model)
         print(f"wrote flow/occlusion assets for {n} frame pairs across clips")
         return
     if args.cmd == "convert-vgg":
