@@ -47,6 +47,27 @@ class MulConstant(nn.Module):
         return x * self.constant
 
 
+class SqueezeExcite(nn.Module):
+    """Squeeze-and-excitation channel attention (Phase-2 generator primitive).
+
+    Channel-wise gating: global-average-pool -> 1x1 reduce -> ReLU -> 1x1 expand
+    -> sigmoid -> scale. Preserves spatial dims and channel count, so it slots
+    into the arch string via the ``E`` token without changing shapes.
+    """
+
+    def __init__(self, channels: int, reduction: int = 8):
+        super().__init__()
+        hidden = max(1, channels // reduction)
+        self.fc1 = nn.Conv2d(channels, hidden, 1)
+        self.fc2 = nn.Conv2d(hidden, channels, 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        s = x.mean(dim=(2, 3), keepdim=True)
+        s = torch.relu(self.fc1(s))
+        s = torch.sigmoid(self.fc2(s))
+        return x * s
+
+
 def _pad_module(padding_type: str, p: int) -> nn.Module | None:
     if p == 0:
         return None
@@ -57,7 +78,8 @@ def _pad_module(padding_type: str, p: int) -> nn.Module | None:
     return None
 
 
-def build_conv_block(dim: int, padding_type: str, use_instance_norm: bool) -> nn.Sequential:
+def build_conv_block(dim: int, padding_type: str, use_instance_norm: bool,
+                     norm: str | None = None) -> nn.Sequential:
     """Two 3x3 convs with norm+ReLU between, matching ``build_conv_block``.
 
     For ``reflect`` / ``replicate`` a padding layer precedes each conv (conv pad
@@ -72,14 +94,14 @@ def build_conv_block(dim: int, padding_type: str, use_instance_norm: bool) -> nn
     if pad is not None:
         layers.append(pad)
     layers.append(nn.Conv2d(dim, dim, 3, stride=1, padding=conv_pad))
-    layers.append(make_norm(dim, use_instance_norm))
+    layers.append(make_norm(dim, use_instance_norm, norm))
     layers.append(nn.ReLU(inplace=True))
 
     pad = _pad_module(padding_type, 1)
     if pad is not None:
         layers.append(pad)
     layers.append(nn.Conv2d(dim, dim, 3, stride=1, padding=conv_pad))
-    layers.append(make_norm(dim, use_instance_norm))
+    layers.append(make_norm(dim, use_instance_norm, norm))
     return nn.Sequential(*layers)
 
 
@@ -91,9 +113,10 @@ class ResidualBlock(nn.Module):
     matches the unpadded conv block's output size.
     """
 
-    def __init__(self, dim: int, padding_type: str, use_instance_norm: bool):
+    def __init__(self, dim: int, padding_type: str, use_instance_norm: bool,
+                 norm: str | None = None):
         super().__init__()
-        self.conv_block = build_conv_block(dim, padding_type, use_instance_norm)
+        self.conv_block = build_conv_block(dim, padding_type, use_instance_norm, norm)
         if padding_type in ("none", "reflect-start"):
             self.shortcut: nn.Module = ShaveImage(2)
         else:

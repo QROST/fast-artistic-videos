@@ -23,6 +23,7 @@ class ModelConfig:
     tanh_constant: float = 150.0
     tv_strength: float = 1e-6
     preprocessing: str = "vgg"  # vgg|resnet
+    norm: str = "instance"  # instance(faithful)|batch|group — Phase-2 backbone option
 
 
 @dataclass
