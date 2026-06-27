@@ -48,3 +48,6 @@ __pycache__/
 build/
 dist/
 debug/
+
+# compiled legacy reference binary
+consistencyChecker/consistencyChecker
