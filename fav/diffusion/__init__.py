@@ -19,6 +19,8 @@ from fav.diffusion.pipeline import (
     SDXLControlNetStylizer,
     stylize_video_diffusion,
     build_stylizer,
+    make_init_image,
+    make_control_image,
 )
 
 __all__ = [
@@ -33,4 +35,6 @@ __all__ = [
     "SDXLControlNetStylizer",
     "stylize_video_diffusion",
     "build_stylizer",
+    "make_init_image",
+    "make_control_image",
 ]
