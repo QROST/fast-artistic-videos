@@ -26,13 +26,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from fav.models.instance_norm import make_norm
-from fav.models.layers import MulConstant, ResidualBlock, build_conv_block
+from fav.models.layers import MulConstant, ResidualBlock, SqueezeExcite, build_conv_block
 
 IN_CHANNELS = 7
 
 
 def _build_core(
-    arch: str, use_instance_norm: bool, padding_type: str, tanh_constant: float
+    arch: str, use_instance_norm: bool, padding_type: str, tanh_constant: float,
+    norm: str | None = None,
 ) -> nn.Sequential:
     tokens = arch.split(",")
     layers: list[nn.Module] = []
@@ -77,12 +78,18 @@ def _build_core(
             )
         elif kind == "C":
             next_dim = int(tok[1:])
-            layers.append(build_conv_block(next_dim, padding_type, use_instance_norm))
+            layers.append(build_conv_block(next_dim, padding_type, use_instance_norm, norm))
             needs_norm = False
             needs_relu = True
         elif kind == "R":
             next_dim = int(tok[1:])
-            layers.append(ResidualBlock(next_dim, padding_type, use_instance_norm))
+            layers.append(ResidualBlock(next_dim, padding_type, use_instance_norm, norm))
+            needs_norm = False
+            needs_relu = False
+        elif kind == "E":
+            # Squeeze-excitation channel attention (no dim/spatial change).
+            next_dim = prev_dim
+            layers.append(SqueezeExcite(prev_dim))
             needs_norm = False
             needs_relu = False
         else:
@@ -92,7 +99,7 @@ def _build_core(
             needs_norm = False
             needs_relu = False
         if needs_norm:
-            layers.append(make_norm(next_dim, use_instance_norm))
+            layers.append(make_norm(next_dim, use_instance_norm, norm))
         if needs_relu:
             layers.append(nn.ReLU(inplace=True))
 
@@ -114,10 +121,11 @@ class Generator(nn.Module):
         use_instance_norm: bool = True,
         padding_type: str = "reflect-start",
         tanh_constant: float = 150.0,
+        norm: str | None = None,
     ):
         super().__init__()
         self.padding_type = padding_type
-        self.core = _build_core(arch, use_instance_norm, padding_type, tanh_constant)
+        self.core = _build_core(arch, use_instance_norm, padding_type, tanh_constant, norm)
         # For reflect-start, measure the constant spatial shrink once and prepend
         # a reflection pad so output size == input size (the "lazy size-fix" from
         # train_video.lua, computed deterministically at build time).
@@ -173,6 +181,7 @@ def build_model(config=None, **overrides) -> Generator:
             use_instance_norm=bool(config.use_instance_norm),
             padding_type=config.padding_type,
             tanh_constant=config.tanh_constant,
+            norm=getattr(config, "norm", None),
         )
     kwargs.update(overrides)
     return Generator(**kwargs)
