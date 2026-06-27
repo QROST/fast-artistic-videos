@@ -52,7 +52,8 @@ class DataConfig:
     fill_occlusions: str = "vgg-mean"  # vgg-mean|uniform-random
     train_img_size: str = "256:256"    # H:W training crop
     source_img_size: int = 384         # images are stored/loaded at this size
-    flow_backend: str = "raft"         # estimator for the real-video source
+    flow_backend: str = "raft"         # raft|sea_raft|flowformer|ptlflow|... (sea_raft = SOTA)
+    flow_model: str = ""               # specific model name for raft/ptlflow backends
 
 
 @dataclass

@@ -36,6 +36,27 @@ fav compute-flow --frames frames/ --out flow/ --backend raft --pattern 'frame_%0
 Writes `backward_{cur}_{prev}.flo` and `reliable_{cur}_{prev}.pgm`, byte-compatible
 with the legacy tooling.
 
+### Flow backends (Phase 2)
+
+The estimator is swappable via `--backend` (or `data.flow_backend` in training):
+
+| backend | needs | notes |
+|---|---|---|
+| `raft` (default) | `torchvision` | out-of-box; `--model raft_large`/`raft_small` |
+| `sea_raft` (**recommended**) | `pip install '.[ptlflow]'` | SOTA accuracy → better occlusion/consistency |
+| `flowformer`, `gma`, `gmflow`, `memflow`, ... | ptlflow | other SOTA models |
+| `ptlflow` | ptlflow | any ptlflow model via `--model <name>` |
+| `dummy` | — | zero flow (tests) |
+
+```bash
+fav compute-flow --frames frames/ --out flow/ --backend sea_raft
+fav train ... data.flow_backend=sea_raft
+```
+
+RAFT stays the default so things work without extra installs; `sea_raft` is the
+quality pick once `ptlflow` is available. Output `.flo`/`.pgm` is identical
+across backends, so datasets and the stylize pipeline are unaffected by the choice.
+
 ## Train a per-style model
 
 ```bash
