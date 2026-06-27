@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import torch
 
+from fav.device import autocast_context
 from fav.occlusion.filters import median_filter, min_filter
 from fav.preprocess import get_methods
 from fav.warp.grid_sample import warp
@@ -28,26 +29,28 @@ def _fill(cert, fill_occlusions, preprocess_fn):
 
 @torch.no_grad()
 def stylize_first_frame(model_vid, model_img, frame_rgb, preprocessing="vgg",
-                        fill_occlusions="vgg-mean"):
+                        fill_occlusions="vgg-mean", precision="fp32"):
     """Stylize the first frame; returns ``(out_rgb, out_pre)`` (out_pre in VGG space)."""
     preprocess_fn, deprocess_fn = get_methods(preprocessing)
     frame_pre = preprocess_fn(frame_rgb)
     b, _, h, w = frame_pre.shape
-    if model_img is not None and model_img != "self":
-        out_pre = model_img(frame_pre)
-    else:
-        # 'self': video model with an all-occluded empty prior.
-        prior = _fill(torch.zeros(b, 1, h, w, device=frame_pre.device, dtype=frame_pre.dtype),
-                      fill_occlusions, preprocess_fn)
-        cert = torch.zeros(b, 1, h, w, device=frame_pre.device, dtype=frame_pre.dtype)
-        out_pre = model_vid(torch.cat([frame_pre, prior, cert], dim=1))
+    with autocast_context(frame_pre.device, precision):
+        if model_img is not None and model_img != "self":
+            out_pre = model_img(frame_pre)
+        else:
+            # 'self': video model with an all-occluded empty prior.
+            prior = _fill(torch.zeros(b, 1, h, w, device=frame_pre.device, dtype=frame_pre.dtype),
+                          fill_occlusions, preprocess_fn)
+            cert = torch.zeros(b, 1, h, w, device=frame_pre.device, dtype=frame_pre.dtype)
+            out_pre = model_vid(torch.cat([frame_pre, prior, cert], dim=1))
+    out_pre = out_pre.float()
     return deprocess_fn(out_pre).clamp(0, 1), out_pre
 
 
 @torch.no_grad()
 def stylize_next_frame(model_vid, prev_out_pre, frame_rgb, flow_dydx, cert,
                        preprocessing="vgg", occlusions_min_filter=7,
-                       fill_occlusions="vgg-mean"):
+                       fill_occlusions="vgg-mean", precision="fp32"):
     """Stylize a subsequent frame using the warped previous output as prior."""
     preprocess_fn, deprocess_fn = get_methods(preprocessing)
     frame_pre = preprocess_fn(frame_rgb)
@@ -56,14 +59,16 @@ def stylize_next_frame(model_vid, prev_out_pre, frame_rgb, flow_dydx, cert,
     warped_masked = warped * cert
     fill = _fill(cert, fill_occlusions, preprocess_fn)
     inp = torch.cat([frame_pre, warped_masked + fill, cert], dim=1)
-    out_pre = model_vid(inp)
+    with autocast_context(frame_pre.device, precision):
+        out_pre = model_vid(inp)
+    out_pre = out_pre.float()
     return deprocess_fn(out_pre).clamp(0, 1), out_pre
 
 
 @torch.no_grad()
 def stylize_sequence(model_vid, frames_rgb, flows, certs, model_img="self",
                      preprocessing="vgg", occlusions_min_filter=7, median_filter_size=3,
-                     fill_occlusions="vgg-mean"):
+                     fill_occlusions="vgg-mean", precision="fp32"):
     """Stylize a whole clip.
 
     Args:
@@ -76,13 +81,13 @@ def stylize_sequence(model_vid, frames_rgb, flows, certs, model_img="self",
     """
     outputs = []
     out_rgb, prev_pre = stylize_first_frame(
-        model_vid, model_img, frames_rgb[0], preprocessing, fill_occlusions
+        model_vid, model_img, frames_rgb[0], preprocessing, fill_occlusions, precision
     )
     outputs.append(_post(out_rgb, median_filter_size))
     for i in range(1, len(frames_rgb)):
         out_rgb, prev_pre = stylize_next_frame(
             model_vid, prev_pre, frames_rgb[i], flows[i - 1], certs[i - 1],
-            preprocessing, occlusions_min_filter, fill_occlusions,
+            preprocessing, occlusions_min_filter, fill_occlusions, precision,
         )
         outputs.append(_post(out_rgb, median_filter_size))
     return outputs

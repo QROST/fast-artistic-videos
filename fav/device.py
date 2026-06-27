@@ -68,3 +68,31 @@ def synchronize(device: torch.device | str) -> None:
         torch.cuda.synchronize()
     elif dev.type == "mps" and hasattr(torch, "mps"):
         torch.mps.synchronize()
+
+
+import contextlib  # noqa: E402
+
+_PRECISION_DTYPE = {"bf16": torch.bfloat16, "fp16": torch.float16}
+
+
+def autocast_context(device: torch.device | str, precision: str = "fp32"):
+    """Return an autocast context manager for ``precision`` (Phase-2 throughput).
+
+    ``fp32`` (the faithful default) returns a no-op context so behavior is
+    unchanged. ``bf16``/``fp16`` enable ``torch.autocast`` on the device's
+    backend; if that backend doesn't support autocast it falls back to no-op.
+    """
+    if precision == "fp32":
+        return contextlib.nullcontext()
+    if precision not in _PRECISION_DTYPE:
+        raise ValueError(f"unknown precision {precision!r}; expected fp32|bf16|fp16")
+    dev_type = torch.device(device).type
+    try:
+        return torch.autocast(device_type=dev_type, dtype=_PRECISION_DTYPE[precision])
+    except (RuntimeError, ValueError):  # backend without autocast support
+        return contextlib.nullcontext()
+
+
+def needs_grad_scaler(device: torch.device | str, precision: str) -> bool:
+    """fp16 on CUDA needs a GradScaler; bf16 and MPS/CPU do not."""
+    return precision == "fp16" and torch.device(device).type == "cuda"

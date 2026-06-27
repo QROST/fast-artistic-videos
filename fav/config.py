@@ -76,6 +76,10 @@ class TrainConfig:
     print_every: int = 10
     device: str | None = None  # None=auto (mps>cuda>cpu)
     seed: int = 0
+    # Phase-2 throughput knobs (defaults reproduce the faithful fp32 path).
+    precision: str = "fp32"        # fp32|bf16|fp16 (autocast; fp32 = faithful)
+    compile_model: bool = False    # torch.compile the generator
+    grad_checkpoint: bool = False  # gradient-checkpoint the final-frame forward
 
 
 @dataclass
@@ -95,6 +99,8 @@ class StylizeConfig:
     scale_factor: float = 1.0
     create_inconsistent: bool = False
     device: str | None = None
+    precision: str = "fp32"        # fp32|bf16|fp16 autocast for inference
+    compile_model: bool = False
 
 
 @dataclass
