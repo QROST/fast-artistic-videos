@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import torch
 
+from fav.device import autocast_context, needs_grad_scaler
 from fav.losses.temporal import temporal_pixel_loss, tv_penalty
 from fav.occlusion.filters import min_filter
 from fav.preprocess import get_methods
@@ -55,8 +56,14 @@ def train_step(
     cfg,
     image_model=None,
     device="cpu",
+    scaler=None,
 ):
-    """One optimization step. ``batch`` = ``(source, imgs_raw, flows, certs)``."""
+    """One optimization step. ``batch`` = ``(source, imgs_raw, flows, certs)``.
+
+    With ``cfg.precision != 'fp32'`` the forward + loss run under ``autocast``;
+    with ``cfg.grad_checkpoint`` the final-frame forward is gradient-checkpointed.
+    The default (fp32, no checkpoint) reproduces the faithful path exactly.
+    """
     source, imgs_raw, flows, certs = batch
     preprocess_fn, _ = get_methods(cfg.model.preprocessing)
 
@@ -65,40 +72,48 @@ def train_step(
     certs = [min_filter(c.to(device), cfg.data.reliable_map_min_filter) for c in certs]
 
     num_steps = len(flows)
-    out1 = _first_frame(model, image_model, source, imgs[0])
-
     optimizer.zero_grad(set_to_none=True)
 
-    out2 = None
-    warped_masked_last = None
-    cert_last = certs[num_steps - 1]
-    for i in range(num_steps):
-        if out2 is not None:
-            out1 = out2.detach()
-        warped = warp(out1, flows[i])
-        warped_masked = warped * certs[i]
-        fill = _generate_fill(certs[i], cfg.data.fill_occlusions, preprocess_fn)
-        inp = torch.cat([imgs[i + 1], warped_masked + fill, certs[i]], dim=1)
-        is_last = i == num_steps - 1
-        if is_last:
-            out2 = model(inp)
-            warped_masked_last = warped_masked
-        else:
-            with torch.no_grad():
-                out2 = model(inp)
+    with autocast_context(device, cfg.precision):
+        out1 = _first_frame(model, image_model, source, imgs[0])
+        out2 = None
+        warped_masked_last = None
+        cert_last = certs[num_steps - 1]
+        for i in range(num_steps):
+            if out2 is not None:
+                out1 = out2.detach()
+            warped = warp(out1, flows[i])
+            warped_masked = warped * certs[i]
+            fill = _generate_fill(certs[i], cfg.data.fill_occlusions, preprocess_fn)
+            inp = torch.cat([imgs[i + 1], warped_masked + fill, certs[i]], dim=1)
+            is_last = i == num_steps - 1
+            if is_last:
+                if cfg.grad_checkpoint:
+                    out2 = torch.utils.checkpoint.checkpoint(model, inp, use_reentrant=False)
+                else:
+                    out2 = model(inp)
+                warped_masked_last = warped_masked
+            else:
+                with torch.no_grad():
+                    out2 = model(inp)
 
-    content_target = imgs[num_steps]
-    out2_masked = out2 * cert_last
+        content_target = imgs[num_steps]
+        out2_masked = out2 * cert_last
 
-    percep = cfg.loss.percep_loss_weight * perceptual(out2, content_target)
-    pixel = cfg.loss.pixel_loss_weight * temporal_pixel_loss(
-        out2_masked, warped_masked_last, cfg.loss.pixel_loss_type
-    )
-    tv = tv_penalty(out2, cfg.model.tv_strength)
-    loss = percep + pixel + tv
+        percep = cfg.loss.percep_loss_weight * perceptual(out2, content_target)
+        pixel = cfg.loss.pixel_loss_weight * temporal_pixel_loss(
+            out2_masked, warped_masked_last, cfg.loss.pixel_loss_type
+        )
+        tv = tv_penalty(out2, cfg.model.tv_strength)
+        loss = percep + pixel + tv
 
-    loss.backward()
-    optimizer.step()
+    if scaler is not None:
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+    else:
+        loss.backward()
+        optimizer.step()
 
     return {
         "loss": float(loss.detach()),
@@ -125,13 +140,20 @@ def train(model, perceptual, data_fn, cfg, device="cpu", image_model=None, max_i
     lr_sched = parse_lr_schedule(cfg.learning_rate)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr_sched[0][1])
 
+    # Phase-2 throughput options (no-ops at the fp32 default).
+    if getattr(cfg, "compile_model", False):
+        model = torch.compile(model)
+    scaler = None
+    if needs_grad_scaler(device, getattr(cfg, "precision", "fp32")):
+        scaler = torch.amp.GradScaler(torch.device(device).type)
+
     n = max_iters if max_iters is not None else cfg.num_iterations
     history = []
     for it in range(1, n + 1):
         for g in optimizer.param_groups:
             g["lr"] = value_at(lr_sched, it)
         batch = data_fn(it)
-        metrics = train_step(model, perceptual, optimizer, batch, cfg, image_model, device)
+        metrics = train_step(model, perceptual, optimizer, batch, cfg, image_model, device, scaler)
         metrics["iter"] = it
         history.append(metrics)
         if on_step is not None:

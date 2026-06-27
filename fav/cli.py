@@ -298,6 +298,12 @@ def main(argv=None):
     p_conv.add_argument("t7")
     p_conv.add_argument("out")
 
+    p_bench = sub.add_parser("bench", help="benchmark generator forward+backward throughput")
+    p_bench.add_argument("--size", type=int, default=256)
+    p_bench.add_argument("--iters", type=int, default=20)
+    p_bench.add_argument("--device", default=None)
+    p_bench.add_argument("overrides", nargs="*", help="dotted key=value (e.g. precision=bf16 compile_model=true)")
+
     for name, cfg_cls in (("train", C.TrainConfig), ("stylize", C.StylizeConfig),
                           ("stylize-vr", C.VRConfig)):
         sp = sub.add_parser(name, help=f"{name} (config-driven)")
@@ -320,6 +326,15 @@ def main(argv=None):
 
         out = convert_vgg16_t7(args.t7, args.out)
         print(f"wrote {out}")
+        return
+    if args.cmd == "bench":
+        from fav.bench import benchmark
+
+        cfg = C.TrainConfig()
+        if args.overrides:
+            cfg = _apply_overrides(cfg, args.overrides)
+        result = benchmark(cfg, device=args.device, size=args.size, iters=args.iters)
+        print("  ".join(f"{k}={v}" for k, v in result.items()))
         return
 
     cfg_cls = {"train": C.TrainConfig, "stylize": C.StylizeConfig, "stylize-vr": C.VRConfig}[args.cmd]
