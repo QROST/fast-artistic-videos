@@ -112,11 +112,15 @@ class StylizeConfig:
 class DiffusionConfig:
     """Phase-3 diffusion + per-style-LoRA stylizer config (runs on M5 Max/MPS)."""
     base_model: str = "stabilityai/stable-diffusion-xl-base-1.0"
-    controlnet: str = ""   # hub id / path of the flow+structure ControlNet
+    controlnet: str = "diffusers/controlnet-canny-sdxl-1.0"  # structure ControlNet
     lora_path: str = ""    # per-style LoRA adapter
     style_ref: str = ""    # style reference image (IP-Adapter) or prompt
+    prompt: str = ""       # text prompt describing the style (used if no IP-Adapter)
+    control: str = "structure"  # which conditioning feeds the ControlNet
     controls: tuple[str, ...] = ("warped_prev_masked", "cert", "structure")
-    strength: float = 0.6              # img2img denoising strength
+    strength: float = 0.6              # img2img denoising strength (subsequent frames)
+    first_strength: float = 0.8        # stronger denoise for the first frame
+    controlnet_scale: float = 0.6      # ControlNet conditioning scale
     num_inference_steps: int = 20
     guidance_scale: float = 5.0
     occlusions_min_filter: int = 7

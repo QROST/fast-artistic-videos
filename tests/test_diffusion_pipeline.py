@@ -11,6 +11,10 @@ from fav.diffusion import (
     SDXLControlNetStylizer,
     stylize_video_diffusion,
     build_stylizer,
+    make_init_image,
+    make_control_image,
+    first_frame_conditioning,
+    build_conditioning,
 )
 from fav.data.synthetic import make_shift
 from fav.warp.grid_sample import warp
@@ -59,19 +63,40 @@ def test_build_stylizer_dummy_and_unknown():
         build_stylizer(backend="nope")
 
 
-def test_sdxl_stub_requires_diffusers_or_not_implemented():
-    cfg = DiffusionConfig()
-    if importlib.util.find_spec("diffusers") is None:
-        with pytest.raises(RuntimeError) as e:
-            SDXLControlNetStylizer(cfg)
-        assert "diffusers" in str(e.value).lower()
-    else:
-        # diffusers present: construction reaches the not-yet-implemented denoise.
-        with pytest.raises(NotImplementedError):
-            SDXLControlNetStylizer(cfg)
+def test_sdxl_requires_diffusers():
+    # Without diffusers the backend must fail at construction with a clear message.
+    if importlib.util.find_spec("diffusers") is not None:
+        pytest.skip("diffusers installed; missing-dep path not exercised")
+    with pytest.raises(RuntimeError) as e:
+        SDXLControlNetStylizer(DiffusionConfig())
+    assert "diffusers" in str(e.value).lower()
+
+
+def test_make_init_image_temporal_anchor():
+    # Reliable region -> warped previous output; occluded region -> content.
+    content = torch.rand(1, 3, 16, 16)
+    cond = first_frame_conditioning(content)  # cert all zero -> init == content
+    assert torch.allclose(make_init_image(content, cond), content.clamp(0, 1))
+    # A fully-certain bundle -> init == warped_prev_masked.
+    prev = torch.rand(1, 3, 16, 16)
+    flow = torch.zeros(1, 2, 16, 16)
+    cert = torch.ones(1, 1, 16, 16)
+    c2 = build_conditioning(content, prev, flow, cert, occlusions_min_filter=1)
+    assert torch.allclose(make_init_image(content, c2), c2.warped_prev_masked.clamp(0, 1))
+
+
+def test_make_control_image_channels():
+    content = torch.rand(1, 3, 16, 16)
+    cond = first_frame_conditioning(content)
+    assert make_control_image(cond, "structure").shape == (1, 3, 16, 16)
+    assert make_control_image(cond, "flow").shape == (1, 3, 16, 16)
+    with pytest.raises(ValueError):
+        make_control_image(cond, "nope")
 
 
 def test_diffusion_config_defaults():
     c = DiffusionConfig()
     assert "warped_prev_masked" in c.controls
     assert c.num_inference_steps > 0 and 0 < c.strength <= 1
+    assert 0 < c.first_strength <= 1 and c.controlnet
+
